@@ -1,0 +1,17 @@
+{
+  "name": "docstack-headless-boot-spike",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Spike: does a pouchdb-core + adapter bundle boot inside Zipline/QuickJS? Throwaway, not a shipped package.",
+  "scripts": {
+    "bundle": "esbuild entry.js --bundle --platform=browser --format=iife --alias:stream=stream-browserify --define:global=globalThis --define:self=globalThis --outfile=dist/spike.js"
+  },
+  "dependencies": {
+    "pouchdb-adapter-memory": "^9.0.0",
+    "pouchdb-core": "^7.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "stream-browserify": "^3.0.0"
+  }
+}

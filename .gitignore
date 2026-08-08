@@ -1,0 +1,14 @@
+node_modules/
+
+# Gradle (gradle-wrapper.jar itself is committed, per the wrapper convention)
+.gradle/
+**/build/
+
+# Kotlin compiler daemon/session state
+.kotlin/
+
+# esbuild output
+dist/
+
+# zipline-cli output (bytecode + manifest, regenerated from dist/)
+ziplineOut/
