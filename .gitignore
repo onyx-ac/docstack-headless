@@ -12,3 +12,7 @@ dist/
 
 # zipline-cli output (bytecode + manifest, regenerated from dist/)
 ziplineOut/
+
+# hand-merged combined module dir (bootstrap + esbuild bundle), regenerated per
+# SPIKE-NOTES.md's "Reproducing (task 2 continuation)" steps
+combined/

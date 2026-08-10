@@ -15,4 +15,4 @@ dependencyResolutionManagement {
     }
 }
 
-include(":cli", ":host")
+include(":cli", ":host", ":bootstrap")

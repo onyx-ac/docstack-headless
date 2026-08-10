@@ -118,35 +118,38 @@ var MemoryAdapter = require('pouchdb-adapter-memory');
 var PouchDB = PouchDBCore.plugin(MemoryAdapter);
 var db = new PouchDB('spike', { adapter: 'memory' });
 
-// console.log turned out to be a dead end for observability: it's not a native
-// QuickJS/Zipline feature at all (Zipline.create()'s own source sets up no such
-// thing) - it only ever "just works" for genuine Kotlin/JS-compiled Zipline apps
-// because Kotlin/JS's stdlib ships its own console polyfill as part of *that*
-// compiled output. For a hand-bundled raw JS module there's no console unless we
-// supply one, and a host-side read-back is simpler and more reliable than wiring
-// a Kotlin-bound console shim. Set a well-known global; the host reads it back via
-// QuickJs.evaluate() after giving the async chain time to settle.
 globalThis.__SPIKE_RESULT__ = 'SPIKE_PENDING';
 globalThis.__SPIKE_TRACE__ = ['boot'];
 
-try {
-  var putPromise = db.put({ _id: 'doc1', hello: 'world' });
-  globalThis.__SPIKE_TRACE__.push('put-called typeof=' + typeof putPromise +
-    ' hasThen=' + (putPromise && typeof putPromise.then));
-  putPromise
-    .then(function () {
-      globalThis.__SPIKE_TRACE__.push('put-resolved');
-      return db.get('doc1');
-    })
-    .then(function (doc) {
-      globalThis.__SPIKE_TRACE__.push('get-resolved');
-      globalThis.__SPIKE_RESULT__ = 'SPIKE_OK ' + JSON.stringify(doc);
-    })
-    .catch(function (err) {
-      globalThis.__SPIKE_TRACE__.push('rejected: ' + (err && err.message ? err.message : String(err)));
-      globalThis.__SPIKE_RESULT__ = 'SPIKE_FAIL ' + (err && err.stack ? err.stack : String(err));
-    });
-} catch (e) {
-  globalThis.__SPIKE_TRACE__.push('sync-throw: ' + (e && e.stack ? e.stack : String(e)));
-  globalThis.__SPIKE_RESULT__ = 'SPIKE_FAIL sync ' + (e && e.stack ? e.stack : String(e));
-}
+// Deferred, not run at module-load time: this module is loaded (its require()
+// calls run) BEFORE the Kotlin/JS bootstrap module's mainFunction is invoked
+// (Zipline's manifest loading order: all modules load/define first, mainFunction
+// runs last - confirmed by reading zipline's own ZiplineManifest/Zipline.get()
+// source). globalThis.setTimeout/console are still the entry.js-local pre-GlobalBridge
+// placeholders above at require() time; they only become the REAL GlobalBridge-backed
+// ones once launchZipline() (bootstrap/Bootstrap.kt) has called Zipline.get(), which
+// happens before it calls this. See SPIKE-NOTES.md for the full sequencing writeup.
+globalThis.__runPouchTest = function () {
+  globalThis.__SPIKE_TRACE__.push('__runPouchTest-start typeof-setTimeout=' + typeof globalThis.setTimeout);
+  try {
+    var putPromise = db.put({ _id: 'doc1', hello: 'world' });
+    globalThis.__SPIKE_TRACE__.push('put-called typeof=' + typeof putPromise +
+      ' hasThen=' + (putPromise && typeof putPromise.then));
+    putPromise
+      .then(function () {
+        globalThis.__SPIKE_TRACE__.push('put-resolved');
+        return db.get('doc1');
+      })
+      .then(function (doc) {
+        globalThis.__SPIKE_TRACE__.push('get-resolved');
+        globalThis.__SPIKE_RESULT__ = 'SPIKE_OK ' + JSON.stringify(doc);
+      })
+      .catch(function (err) {
+        globalThis.__SPIKE_TRACE__.push('rejected: ' + (err && err.message ? err.message : String(err)));
+        globalThis.__SPIKE_RESULT__ = 'SPIKE_FAIL ' + (err && err.stack ? err.stack : String(err));
+      });
+  } catch (e) {
+    globalThis.__SPIKE_TRACE__.push('sync-throw: ' + (e && e.stack ? e.stack : String(e)));
+    globalThis.__SPIKE_RESULT__ = 'SPIKE_FAIL sync ' + (e && e.stack ? e.stack : String(e));
+  }
+};

@@ -30,25 +30,31 @@ fun main() {
         println("SPIKE: module loaded and evaluated without a load-time exception.")
         val quickJs = result.zipline.quickJs
 
-        // put()/get() are deferred through entry.js's own setTimeout queue (see
-        // entry.js - Zipline's real event-loop bridge isn't available to a raw JS
-        // module). Drive it from the host until the result settles or we time out.
+        // No host-side drain loop anymore. The manifest's mainFunction
+        // (bootstrap/Bootstrap.kt's launchZipline) already ran as part of loading:
+        // it called the real Zipline.get() (installing GlobalBridge's real
+        // setTimeout/console, wired to the host's own CoroutineEventLoop) and then
+        // invoked entry.js's deferred globalThis.__runPouchTest(). Progress now
+        // happens on its own via the dispatcher thread processing real scheduled
+        // coroutine jobs - this loop only polls to observe when it's done, it does
+        // not drive it.
         var value: Any?
         var attempts = 0
         do {
-          val drained = quickJs.evaluate("globalThis.__drainTasks && globalThis.__drainTasks()", "drain.js")
           value = quickJs.evaluate("globalThis.__SPIKE_RESULT__", "readResult.js")
           if (attempts < 10 || attempts % 25 == 0) {
-            println("  [attempt $attempts] drained=$drained result=$value")
+            println("  [attempt $attempts] result=$value")
           }
           if (value != "SPIKE_PENDING") break
           delay(20)
           attempts++
         } while (attempts < 250) // ~5s ceiling
 
-        val trace = quickJs.evaluate("JSON.stringify(globalThis.__SPIKE_TRACE__)", "trace.js")
-        println("SPIKE_TRACE: $trace")
-        println("SPIKE_RESULT: $value (after $attempts drain attempts)")
+        val bootstrapTrace = quickJs.evaluate("JSON.stringify(globalThis.__BOOTSTRAP_TRACE__)", "bootstrapTrace.js")
+        val spikeTrace = quickJs.evaluate("JSON.stringify(globalThis.__SPIKE_TRACE__)", "spikeTrace.js")
+        println("BOOTSTRAP_TRACE: $bootstrapTrace")
+        println("SPIKE_TRACE: $spikeTrace")
+        println("SPIKE_RESULT: $value (after $attempts read attempts, no drain calls)")
       }
       is LoadResult.Failure -> {
         println("SPIKE: load failed")
