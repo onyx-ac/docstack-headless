@@ -264,6 +264,153 @@ cd ../..
 ./gradlew :host:run   # uses the old __drainTasks() polling loop's code path
 ```
 
+## Real module: HeadlessCarrier/PouchDbFacade against the real stack (2026-08-10)
+
+**Status: blocked on an apparent Zipline/QuickJS bug, not something fixable from this
+module.** The real (non-spike) `docstack-headless/engine/` module was built: a
+`com.android.kotlin.multiplatform.library` + `kotlin("multiplatform")` + `app.cash.zipline`
+module with `androidTarget()` (host side, wired to the real `StorageDispatcher` via
+`RealHeadlessCarrier`) and `js()` (guest side, `Guest.kt`), plus `engine/js-bundle/` —
+a new esbuild setup bundling the *real* `pouchdb-core` + `@docstack/pouchdb-adapter-native`
+(not the `pouchdb-adapter-memory` stand-in above). All of this compiles and links
+correctly: `EngineIntegrationTest` (`androidHostTest`, plain JVM, no emulator) boots a
+real `Zipline` via `ZiplineLoader`, binds `RealHeadlessCarrier` over a real
+`InMemoryDocumentStore`, takes `PouchDbFacade`, and calls `facade.put(...)`.
+
+The **first** outbound call the real adapter's `_bulkDocs` makes through
+`globalThis.__docstackHost` (`getRevTrees`) reaches the host, gets processed by the real
+`StorageDispatcher`, and returns successfully — confirmed via host-side `println` in
+`RealHeadlessCarrier.dispatch` (the only diagnostic channel that survives the failure;
+see below). The **second** chained call (`bulkWrite`, needed to actually persist the new
+document) never arrives at the host at all — no exception, no rejection, just a
+`TimeoutCancellationException` after `withTimeout(8_000)` in the test.
+
+### Bisection trail
+
+Exhaustively narrowed down over many iterations, each confirmed via a `diagX`-style
+marker `id` visible (or not) in `RealHeadlessCarrier.dispatch`'s `println`s:
+
+1. **Not the real adapter's own logic.** Reproduced with a synthetic plain-JS function
+   making two sequential trivial `info` calls through `globalThis.__docstackHost` —
+   `pouchdb-adapter-native`/`pouchdb-merge` code is not involved at all.
+2. **Not a coroutine-dispatcher issue.** Reproduces identically regardless of how the
+   Kotlin side of `dispatchFn` is implemented: `GlobalScope.promise{}`,
+   `GlobalScope.promise(start = CoroutineStart.UNDISPATCHED)`, a raw `Continuation` on
+   `EmptyCoroutineContext` (bypassing `Dispatchers.Default`/`kotlinx-coroutines-core`
+   entirely), and a persistent single coroutine draining a `Channel` (started via
+   `startCoroutine`, not `GlobalScope.launch{}` — see next point).
+3. **`GlobalScope.launch{}`'s own start needs `Dispatchers.Default.dispatch()` to fire,
+   and that never happens in this environment** — a `GlobalScope.launch{}` body never
+   even begins executing here, regardless of what's inside it. `kotlin.coroutines.startCoroutine`
+   on a raw `Continuation`, by contrast, always reliably starts (it runs synchronously up
+   to the first suspension point, no dispatcher needed). This is a real, separate finding
+   worth remembering for any future Zipline/JS work in this environment, but is not
+   itself the cause of the main bug (see next point).
+4. `kotlinx-coroutines-core`'s JS `Dispatchers.Default` resolves to `NodeDispatcher`
+   (`process.nextTick`-based) whenever a `process` global with a `nextTick` function is
+   present — our `js-bundle/entry.js` `process` shim had one (routed through
+   `setTimeout` for `pouchdb-core`'s benefit). Fixed to route through
+   `Promise.resolve().then()` instead (a real microtask) — confirmed via reading
+   `kotlinx-coroutines-core.js`'s actual compiled output
+   (`createDefaultDispatcher()`/`NodeDispatcher`/`SetTimeoutDispatcher`). **This was a
+   real, independent bug, now fixed, but did not fix the main issue either** — it's now
+   moot per point 2 above, since raw-`Continuation` dispatch (which needs no
+   `Dispatchers.Default` at all) reproduces identically.
+5. `delay(50)` chained twice in a row, purely in Kotlin (no JS boundary), **succeeds
+   both times** — so `GlobalBridge`'s real cross-boundary `setTimeout` does handle
+   repeat scheduling correctly. Rules out "any scheduled/deferred resumption is broken"
+   as too broad a theory.
+6. **The actual trigger: a second call to the JS-exposed `dispatchFn` closure, chained
+   off the first call's own resolution (via `await` or `.then()`, micro- or macrotask,
+   doesn't matter), never reaches the host.** But:
+   - Two calls fired **concurrently** (neither awaiting the other before both start)
+     **both succeed**.
+   - Pure Kotlin code calling `carrier.dispatch()` repeatedly, sequentially, from an
+     already-running coroutine **always succeeds** (3+ calls confirmed, with real
+     `delay()`s between them).
+   - It is specifically: JS calls the exported closure → gets a promise → chains more
+     work off its resolution → that chained work calls the closure again → the second
+     call is lost. Reproduces via `await`, via `.then()`, via a `.then()` deliberately
+     deferred through a real `setTimeout(0)` macrotask (ruling out a microtask-nesting
+     theory), and via the real adapter's actual `_bulkDocs` code path.
+   - The rejection handler on the outer promise never fires either (checked explicitly
+     by wiring it to report through the working host-`println` channel) — it's a
+     genuine silent hang, not a swallowed synchronous exception.
+   - Read Zipline's own `OutboundCallHandler.kt` source directly (`cashapp/zipline` tag
+     `1.27.0`): outbound suspend calls use a single mutable `endpoint.callCodec.lastInboundCall!!`
+     when a call's success/failure callback fires — a plausible-looking but unconfirmed
+     candidate given it's a shared mutable field read with a forced non-null assertion,
+     but no direct evidence (no exception ever surfaces) ties it to this specific
+     symptom.
+7. **Not fixable by version.** Reproduces identically on Zipline 1.25.0 (Kotlin 2.3.0)
+   and 1.27.0 (Kotlin 2.3.20) — not a recent regression between those two releases.
+8. **Not fixable by brute-force "always keep something in flight."** A background
+   keep-alive loop (`while (true) { carrier.dispatch(...) }`, no delay) was tried to
+   test whether the trigger is really "nothing else concurrently in flight" — this was
+   actively dangerous: it monopolized the single-threaded JVM test executor so
+   thoroughly that even `withTimeout(8_000)` never fired, and the JVM test worker had
+   to be killed manually (`taskkill`/`Stop-Process`) after the fact. **Do not repeat
+   this experiment without a real backoff/delay between iterations.**
+
+### Current state
+
+`engine/`'s production code (`RealHeadlessCarrier.kt`, `Guest.kt`, `PouchDbFacade.kt`,
+`HeadlessCarrier.kt`) is left in its cleanest working form: the persistent-coroutine/
+`Channel`-draining `dispatchFn` from point 3/6 above (not because it fixes the bug — it
+doesn't — but because it's the most defensible implementation among everything tried,
+and matches the one call shape empirically proven to always work for calls Kotlin
+itself initiates). `EngineIntegrationTest` is left in place and **currently fails** —
+its doc comment says so explicitly. `RealHeadlessCarrier.dispatch`'s two `println`
+statements are kept deliberately (the only diagnostic channel that survives the hang;
+a second `QuickJs.evaluate()` call after the timeout reliably throws
+`QuickJsException: stack overflow`, so nothing else can be read back from the guest
+once this happens).
+
+### Next steps if this is picked back up
+
+- File a minimal repro against `cashapp/zipline` (GitHub issue) — the synthetic
+  two-sequential-calls repro from bisection step 1 is close to minimal already; would
+  need trimming to a plain Zipline sample app (no `docstack-store`/PouchDB involved) to
+  be a good upstream bug report. Not filed yet — needs a maintainer's own GitHub
+  account/repo, not something done from this session.
+- Worth reading `CallCodec.kt`, `Endpoint.kt`, and `InboundService.kt` in full (only
+  `OutboundCallHandler.kt` was read end to end) to actually confirm or rule out the
+  `lastInboundCall` theory from bisection step 6, rather than leaving it as an
+  unconfirmed lead.
+- The `EngineApi`-gated `Zipline.quickJs` escape hatch might allow reading Zipline's
+  *own* internal event-listener/debug hooks (an `EventListener` override passed to
+  `Zipline.create`) for more visibility into what happens between "host prints
+  `returning`" and "the second call never arrives" — not tried.
+
+## Reproducing (real module)
+
+```bash
+cd android/docstack-headless
+
+# 1. Build the engine module's own Kotlin/JS Zipline output.
+./gradlew :engine:compileProductionExecutableKotlinJsZipline
+
+# 2. Rebuild the real pouchdb-core + @docstack/pouchdb-adapter-native esbuild bundle
+#    and compile it to Zipline bytecode via the spike's :cli module (same tool, works
+#    fine pointed at a different repo's paths - it's a generic zipline-cli wrapper).
+cd engine/js-bundle && npm run bundle && cd ../..
+cd spike
+rm -rf "$(pwd)/../engine/js-bundle/ziplineOut"
+mkdir -p "../engine/js-bundle/ziplineOut"
+./gradlew :cli:run --args="compile --input E:/repos/docstack/android/docstack-headless/engine/js-bundle/dist --output E:/repos/docstack/android/docstack-headless/engine/js-bundle/ziplineOut"
+cd ..
+
+# 3. Merge engine's own manifest with js-bundle's into engine/combined/.
+cd engine && python merge-manifest.py && cd ..
+
+# 4. Run the (currently failing) integration test.
+./gradlew :engine:testAndroidHostTest --tests "*EngineIntegrationTest*"
+```
+
+`merge-manifest.py` (`engine/merge-manifest.py`) is the reusable version of the
+inline Python script from the original manifest-merge technique below — same idea,
+just pointed at `engine/`'s paths instead of `spike/`'s.
+
 ## Reproducing (task 2 continuation - real event-loop bridge)
 
 ```bash

@@ -1,5 +1,15 @@
 node_modules/
 
+# Machine-local Android SDK path
+local.properties
+
+# Zipline's Android-target artifact expects a real device's native quickjs lib
+# (Android jniLibs packaging); for local host-JVM test runs, engine/src/androidHostTest/
+# jniLibs/quickjs.dll is manually extracted from app.cash.zipline:zipline-jvm's own jar
+# (its jni/<arch>/ resource) - a machine-specific dev convenience, not a repo artifact.
+# See EngineIntegrationTest's doc comment / SPIKE-NOTES.md for how to regenerate it.
+engine/src/androidHostTest/jniLibs/
+
 # Gradle (gradle-wrapper.jar itself is committed, per the wrapper convention)
 .gradle/
 **/build/

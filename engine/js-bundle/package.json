@@ -1,0 +1,17 @@
+{
+  "name": "docstack-headless-engine-bundle",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Real pouchdb-core + @docstack/pouchdb-adapter-native, esbuild-bundled for QuickJS/Zipline. Not a shipped package - engine/build.gradle.kts's zipline-cli step compiles dist/bundle.js to Zipline bytecode, combined with the Kotlin/JS module's own manifest per SPIKE-NOTES.md's manifest-merge technique.",
+  "scripts": {
+    "bundle": "esbuild entry.js --bundle --platform=browser --format=iife --alias:stream=stream-browserify --define:global=globalThis --define:self=globalThis --outfile=dist/bundle.js"
+  },
+  "dependencies": {
+    "@docstack/pouchdb-adapter-native": "file:../../../../packages/pouchdb-adapter-native",
+    "pouchdb-core": "^9.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "stream-browserify": "^3.0.0"
+  }
+}
